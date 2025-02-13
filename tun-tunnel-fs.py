@@ -23,6 +23,76 @@ def runcmd(
     return subprocess.run(cmd, check=check, capture_output=capture_output)
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="tun-tunnel-fs",
+        description="Demo project tunneling network traffic over the filesystem as physical layer (using a TUN device).",
+    )
+
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "--server", action="store_true", dest="server", help="Run in server mode"
+    )
+    group.add_argument(
+        "--client", action="store_false", dest="server", help="Run in client mode"
+    )
+
+    parser.add_argument(
+        "--ifname",
+        help="TUN: Name of the tun interface that should be created",
+        default="tun0",
+    )
+
+    parser.add_argument(
+        "--ip",
+        help="TUN: IP address of this program instance in CIDR notation (example: 192.0.2.1/24)",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--dirpath",
+        help="FS: path to the directory that should be used for the actual data exchange as physical layer",
+        required=True,
+    )
+
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_const",
+        const=logging.DEBUG,
+        default=logging.INFO,
+        dest="loglevel",
+    )
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        encoding="utf8",
+        level=args.loglevel,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+
+    if not os.path.isdir(args.dirpath):
+        logging.info(
+            'Specified directory path "%s" doesn\'t exist. Creating it...', args.dirpath
+        )
+
+    if (
+        runcmd(
+            ["ip", "link", "show", "dev", args.ifname], check=False, capture_output=True
+        ).returncode
+        == 0
+    ):
+        parser.error(
+            f"Specified tun interface name {args.ifname} already exists. "
+            + "In case it is a left-over from a previous run of this program (this shouldn't usually happen), "
+            + "it can be deleted with \n\n    sudo ip link delete tun0\n\n"
+            + "Otherwise, specify another interface name."
+        )
+
+    return args
+
+
 # Used for capturing and restoring the network configuration of the system
 # before starting this program.
 @dataclass
@@ -40,38 +110,6 @@ def get_netconfig() -> NetConfig:
         .strip()
     )
     return NetConfig(ip_forward, default_route)
-
-
-def tun_setup(ifname: str, ipcidr: str, server: bool) -> typing.IO[bytes]:
-    ip = ipcidr.split("/")[0]
-
-    runcmd(["ip", "tuntap", "add", "name", ifname, "mode", "tun"])
-    runcmd(["ip", "addr", "add", ipcidr, "broadcast", "+", "dev", ifname])
-    runcmd(["ip", "link", "set", "dev", ifname, "up"])
-
-    if server:
-        with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
-            f.write("1")
-        # fmt: off
-        runcmd(["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", ipcidr, "-j", "MASQUERADE"])
-        runcmd(["iptables", "-A", "FORWARD", "-i", ifname, "-s", ipcidr, "-j", "ACCEPT"])
-        runcmd(["iptables", "-A", "FORWARD", "-o", ifname, "-d", ipcidr, "-j", "ACCEPT"])
-        # fmt: on
-    else:
-        runcmd(["ip", "route", "replace", "default", "via", ip, "dev", ifname])
-
-    tun = open("/dev/net/tun", "r+b", buffering=0)
-    # see linux/if.h and linux/if_tun.h
-    LINUX_IFF_TUN = 0x0001
-    LINUX_IFF_NO_PI = 0x1000
-    LINUX_TUNSETIFF = 0x400454CA
-    flags = LINUX_IFF_TUN | LINUX_IFF_NO_PI
-    ifreq = struct.pack("16sH22s", ifname.encode("utf8"), flags, b"")  # struct ifreq
-    ioctl(tun, LINUX_TUNSETIFF, ifreq)
-
-    print()
-
-    return tun
 
 
 def tun_teardown(ifname: str, server: bool, ipcidr: str, netconfig: NetConfig) -> None:
@@ -102,6 +140,38 @@ def signal_handler(
         tun_teardown(name, server, ipcidr, netconfig)
 
     return handler
+
+
+def tun_setup(ifname: str, ipcidr: str, server: bool) -> typing.IO[bytes]:
+    ip = ipcidr.split("/")[0]
+
+    runcmd(["ip", "tuntap", "add", "name", ifname, "mode", "tun"])
+    runcmd(["ip", "addr", "add", ipcidr, "broadcast", "+", "dev", ifname])
+    runcmd(["ip", "link", "set", "dev", ifname, "up"])
+
+    if server:
+        with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
+            f.write("1")
+        # fmt: off
+        runcmd(["iptables", "-t", "nat", "-A", "POSTROUTING", "-s", ipcidr, "-j", "MASQUERADE"])
+        runcmd(["iptables", "-A", "FORWARD", "-i", ifname, "-s", ipcidr, "-j", "ACCEPT"])
+        runcmd(["iptables", "-A", "FORWARD", "-o", ifname, "-d", ipcidr, "-j", "ACCEPT"])
+        # fmt: on
+    else:
+        runcmd(["ip", "route", "replace", "default", "via", ip, "dev", ifname])
+
+    print()
+
+    tun = open("/dev/net/tun", "r+b", buffering=0)
+    # see linux/if.h and linux/if_tun.h
+    LINUX_IFF_TUN = 0x0001
+    LINUX_IFF_NO_PI = 0x1000
+    LINUX_TUNSETIFF = 0x400454CA
+    flags = LINUX_IFF_TUN | LINUX_IFF_NO_PI
+    ifreq = struct.pack("16sH22s", ifname.encode("utf8"), flags, b"")  # struct ifreq
+    ioctl(tun, LINUX_TUNSETIFF, ifreq)
+
+    return tun
 
 
 def isprintable(c: int) -> bool:
@@ -193,76 +263,6 @@ async def from_fs(dirpath: str, ipcidr: str, tun: typing.IO[bytes]) -> None:
                 logging.warning("ERROR %s", e)
 
         await asyncio.sleep(0.1)  # Prevent busy looping
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        prog="tun-tunnel-fs",
-        description="Demo project tunneling network traffic over the filesystem as physical layer (using a TUN device).",
-    )
-
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--server", action="store_true", dest="server", help="Run in server mode"
-    )
-    group.add_argument(
-        "--client", action="store_false", dest="server", help="Run in client mode"
-    )
-
-    parser.add_argument(
-        "--ifname",
-        help="TUN: Name of the tun interface that should be created",
-        default="tun0",
-    )
-
-    parser.add_argument(
-        "--ip",
-        help="TUN: IP address of this program instance in CIDR notation (example: 192.0.2.1/24)",
-        required=True,
-    )
-
-    parser.add_argument(
-        "--dirpath",
-        help="FS: path to the directory that should be used for the actual data exchange as physical layer",
-        required=True,
-    )
-
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_const",
-        const=logging.DEBUG,
-        default=logging.INFO,
-        dest="loglevel",
-    )
-
-    args = parser.parse_args()
-
-    logging.basicConfig(
-        encoding="utf8",
-        level=args.loglevel,
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-
-    if not os.path.isdir(args.dirpath):
-        logging.info(
-            'Specified directory path "%s" doesn\'t exist. Creating it...', args.dirpath
-        )
-
-    if (
-        runcmd(
-            ["ip", "link", "show", "dev", args.ifname], check=False, capture_output=True
-        ).returncode
-        == 0
-    ):
-        parser.error(
-            f"Specified tun interface name {args.ifname} already exists. "
-            + "In case it is a left-over from a previous run of this program (this shouldn't usually happen), "
-            + "it can be deleted with \n\n    sudo ip link delete tun0\n\n"
-            + "Otherwise, specify another interface name."
-        )
-
-    return args
 
 
 async def main() -> None:
