@@ -114,6 +114,7 @@ def get_netconfig() -> NetConfig:
 
 def tun_teardown(ifname: str, server: bool, ipcidr: str, netconfig: NetConfig) -> None:
     if server:
+        logging.info("Restoring ip_forward to %s", netconfig.ip_forward.strip())
         with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
             f.write(netconfig.ip_forward)
         # fmt: off
@@ -150,6 +151,7 @@ def tun_setup(ifname: str, ipcidr: str, server: bool) -> typing.IO[bytes]:
     runcmd(["ip", "link", "set", "dev", ifname, "up"])
 
     if server:
+        logging.info("Setting ip_forward to 1")
         with open("/proc/sys/net/ipv4/ip_forward", "w") as f:
             f.write("1")
         # fmt: off
