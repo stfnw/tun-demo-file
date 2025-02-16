@@ -47,7 +47,9 @@ Setup: two VMs:
 
 In this demo we share the internet of VM `B` with the VM `A` through the TUN tunnel created by this program.
 
-TODO add demo video
+
+https://github.com/user-attachments/assets/1b2357d7-f5fd-4ee5-8617-e04737064737
+
 
 On VM `A`: this will create a new network interface `tun0`, assign it the IP address 192.0.2.2/24 and set the default route of the system to be over this interface.
 For transferring the actual data, files in the shared folder that is mounted at `/share` will be used.
